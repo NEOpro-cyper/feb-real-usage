@@ -1,0 +1,17 @@
+# ============================================================
+# Nixpacks build plan (Coolify / Railway / `nixpacks build`)
+# NO Docker Compose needed — this builds and runs the app directly.
+# ============================================================
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["npm install"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+# standalone Next.js server — plain node, binds 0.0.0.0:$PORT
+cmd = "npm run start"
