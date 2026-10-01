@@ -323,12 +323,20 @@ function parseGbText(t: string | undefined | null): number {
 /**
  * GET /console/user_traffic_query — the account's REAL high-speed flow usage
  * as reported by FebBox (the same number the dashboard shows in the
- * "High Speed Flow" popup): { code:1, data:{ used, traffic_usage,
- * traffic_limit, reset_at } }.
+ * "High Speed Flow" popup).
  *
- * `used` is numeric GB (FebBox's own JS compares it against < 100).
- * This replaces the size-based estimate for the usage guard with the real
- * counter — including the daily reset (used drops back after reset_at).
+ * Verified live response (2026-10):
+ * { code:1, msg:"success", data:{
+ *     traffic_usage:"19.76 GB", traffic_usage_mb:20235.33,
+ *     traffic_yesterday_usage:"0.02 GB", traffic_yesterday_usage_mb:19.88,
+ *     traffic_today_usage:"19.76 GB", traffic_today_usage_mb:20235.33,
+ *     traffic_limit:"100 GB", traffic_limit_mb:102400,
+ *     is_vip:1, reset_at:"19 Hours", off:0, used:0 } }
+ *
+ * ⚠️  `used` is NOT the usage — FebBox keeps it at 0 even while 19+ GB are
+ * consumed. The real counter is `traffic_usage_mb` (numeric MB, equals
+ * `traffic_today_usage_mb`; the counter resets daily per `reset_at`).
+ * Parse order: numeric MB fields first, display text as fallback.
  */
 export async function fetchRealUsage(
   cookieRaw: string,
@@ -348,7 +356,17 @@ export async function fetchRealUsage(
       code?: number
       msg?: string
       login_required?: number
-      data?: { used?: unknown; traffic_usage?: unknown; traffic_limit?: unknown; reset_at?: unknown }
+      data?: {
+        used?: unknown
+        off?: unknown
+        traffic_usage?: unknown
+        traffic_usage_mb?: unknown
+        traffic_today_usage?: unknown
+        traffic_today_usage_mb?: unknown
+        traffic_limit?: unknown
+        traffic_limit_mb?: unknown
+        reset_at?: unknown
+      }
     }
     try {
       j = JSON.parse(trimmed)
@@ -360,12 +378,23 @@ export async function fetchRealUsage(
       return { ok: false, accountError: accountLevel, error: j.msg || 'user_traffic_query rejected' }
     }
     const d = j.data || {}
+    const num = (v: unknown): number => {
+      const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''))
+      return isFinite(n) ? n : NaN
+    }
     const usageText = d.traffic_usage != null ? String(d.traffic_usage) : ''
     const limitText = d.traffic_limit != null ? String(d.traffic_limit) : ''
-    let usedGb = typeof d.used === 'number' ? d.used : parseGbText(usageText.split('/')[0])
+
+    // REAL counter: numeric MB fields (traffic_usage_mb == traffic_today_usage_mb).
+    // NEVER trust `used` — FebBox returns 0 there regardless of actual usage.
+    let usedGb = num(d.traffic_usage_mb) / 1024
+    if (!isFinite(usedGb)) usedGb = num(d.traffic_today_usage_mb) / 1024
+    if (!isFinite(usedGb)) usedGb = parseGbText(usageText.split('/')[0])
     if (!isFinite(usedGb)) usedGb = parseGbText(usageText)
     if (!isFinite(usedGb)) return { ok: false, error: 'could not parse used GB from response' }
-    const limitGb = parseGbText(limitText)
+
+    let limitGb = num(d.traffic_limit_mb) / 1024
+    if (!isFinite(limitGb)) limitGb = parseGbText(limitText)
     return {
       ok: true,
       usedGb: Math.round(usedGb * 100) / 100,
