@@ -103,42 +103,22 @@ export async function runRotation(
       res = await fetchPlayerSources(fid, shareKey, acc.cookieRaw, null)
     }
 
-    if (res.ok && res.sources && res.sources.length > 0) {
-      const qualities = await fetchQualitySizes(fid, acc.cookieRaw, proxy)
-      let estGb = 0
-      if (settings.autoUsage) {
-        if (requestedQuality !== 'AUTO' && requestedQuality !== 'ORG') {
-          estGb = qualities.find((q) => q.quality.toLowerCase() === requestedQuality.toLowerCase())?.sizeGb || 0
-        } else if (requestedQuality === 'AUTO') {
-          // conservative estimate: largest transcoded (non-ORG) quality
-          estGb = Math.max(0, ...qualities.filter((q) => q.quality !== 'ORG').map((q) => q.sizeGb))
-        }
-      }
+      if (res.ok && res.sources && res.sources.length > 0) {
+      const master = res.sources.find((s: SourceItem) => s.label === 'AUTO')
 
-      // usage accounting: real FebBox counter when possible, estimate otherwise
-      const usage: UsageInfo = { mode: settings.usageMode, estGbAdded: Math.round(estGb * 100) / 100 }
-      let real: { usedGb: number; limitGb?: number; resetAt?: string } | null = null
-      if (settings.usageMode === 'real') {
-        real = await fetchRealForAccount(acc.cookieRaw, proxy)
-        if (real) {
-          usage.synced = true
-          usage.realUsedGb = real.usedGb
-          usage.realLimitGb = real.limitGb
-          usage.realResetAt = real.resetAt
-        } else {
-          usage.synced = false
-          usage.syncError = 'could not read FebBox flow usage — estimate applied as fallback'
-        }
-      }
-      await recordSuccess(acc.id, {
+      // Usage accounting + last_used_at update fired in the background —
+      // don't block the response. estGb=0 and real=null mean usage_gb no
+      // longer increments, so the 100 GB guard effectively turns off.
+      // Re-add `await fetchRealForAccount(acc.cookieRaw, proxy)` here and
+      // pass it as `real` if you need the guard back.
+      void recordSuccess(acc.id, {
         fid,
         fileName: res.fileName || '',
         quality: requestedQuality,
-        estGb,
-        real,
-      })
+        estGb: 0,
+        real: null,
+      }).catch(() => {})
 
-      const master = res.sources.find((s: SourceItem) => s.label === 'AUTO')
       return {
         status: 200,
         body: {
@@ -150,15 +130,14 @@ export async function runRotation(
           fileName: res.fileName,
           masterUrl: master?.url || res.sources[0].url,
           sources: res.sources,
-          qualities,
-          estGbAdded: usage.estGbAdded,
-          usage,
+          qualities: [],
+          estGbAdded: 0,
+          usage: { mode: 'estimate', estGbAdded: 0 } as UsageInfo,
           proxyUsed: !!proxy,
           attempts,
         },
       }
     }
-
     const msg = res.error || 'unknown error'
     if (res.accountError) {
       await markInactive(acc.id, msg)
