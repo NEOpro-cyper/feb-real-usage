@@ -62,7 +62,7 @@ async function handle(
     return NextResponse.redirect(picked.url, 302)
   }
 
-  return NextResponse.json(
+   return NextResponse.json(
     {
       ok: true,
       success: true,
@@ -70,8 +70,6 @@ async function handle(
       fileName: body.fileName ?? null,
       quality: picked.label,
       stream: master.url,
-      url: picked.url,
-      allQualities: sourceMap(sources),
       expiresHours: 4.5,
       usedCookie: {
         id: (body.usedCookie as { id?: string })?.id,
