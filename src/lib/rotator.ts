@@ -127,8 +127,6 @@ export async function runRotation(
           shareKey: shareKey || null,
           ossFid: res.ossFid,
           fileName: res.fileName,
-          masterUrl: master?.url || res.sources[0].url,
-          sources: res.sources,
           qualities: res.qualities || [],
           estGbAdded: 0,
           usage: { mode: 'estimate', estGbAdded: 0 } as UsageInfo,
