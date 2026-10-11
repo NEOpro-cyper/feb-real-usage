@@ -166,6 +166,8 @@ export interface PlayerResult {
   sources?: SourceItem[]
   fileName?: string
   raw?: string
+  /** only set by fetchQualitySources() */
+  qualities?: QualityInfo[]
 }
 
 /** POST /file/player and extract the pre-signed sources array. */
@@ -285,6 +287,35 @@ export async function fetchQualitySizes(
   } catch {
     return []
   }
+}
+
+/**
+ * GET /console/video_quality_list — direct pre-signed play URLs (ORG mp4 +
+ * per-quality m3u8) without the /file/player round-trip. Parses the same
+ * `file_quality` HTML the site's quality picker uses. No AUTO master exists
+ * here, so AUTO is synthesized as the highest transcoded m3u8 (usually 1080p).
+ */
+export async function fetchQualitySources(
+  fid: string,
+  cookieRaw: string,
+  proxyUrl?: string | null
+): Promise<PlayerResult> {
+  const qualities = await fetchQualitySizes(fid, cookieRaw, proxyUrl)
+  if (qualities.length === 0) {
+    return { ok: false, error: 'video_quality_list gave nothing (bad fid / dead cookie / Cloudflare)' }
+  }
+  const sources: SourceItem[] = qualities.map((q) => ({
+    label: q.quality,
+    type: q.quality === 'ORG' ? 'video/mp4' : 'application/x-mpegURL',
+    url: q.url,
+  }))
+  const best = qualities
+    .filter((q) => q.quality !== 'ORG')
+    .sort((a, b) => b.sizeGb - a.sizeGb)[0]
+  if (best) {
+    sources.unshift({ label: 'AUTO', type: 'application/x-mpegURL', url: best.url })
+  }
+  return { ok: true, sources, fileName: '', qualities }
 }
 
 /* ------------------------- real usage (flow) ------------------------- */
