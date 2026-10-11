@@ -70,6 +70,10 @@ async function handle(
       fileName: body.fileName ?? null,
       quality: picked.label,
       stream: master.url,
+      url: picked.url,
+      masterUrl: master.url,
+      sources,
+      qualities: body.qualities || [],
       expiresHours: 4.5,
       usedCookie: {
         id: (body.usedCookie as { id?: string })?.id,
