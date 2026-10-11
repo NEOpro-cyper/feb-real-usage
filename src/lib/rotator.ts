@@ -129,7 +129,7 @@ export async function runRotation(
           fileName: res.fileName,
           masterUrl: master?.url || res.sources[0].url,
           sources: res.sources,
-          qualities: [],
+          qualities: res.qualities || [],
           estGbAdded: 0,
           usage: { mode: 'estimate', estGbAdded: 0 } as UsageInfo,
           proxyUsed: !!proxy,
