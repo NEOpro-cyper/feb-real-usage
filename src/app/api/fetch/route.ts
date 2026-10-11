@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { countCookies } from '@/lib/pool'
 import {
-  fetchPlayerSources,
-  fetchQualitySizes,
+  fetchQualitySources,
   fetchRealUsage,
   extractShareKey,
   type SourceItem,
@@ -72,13 +71,13 @@ export async function POST(req: NextRequest) {
 
   for (const acc of candidates) {
     // 1st try through proxy, fallback to direct on network failure
-    let res = await fetchPlayerSources(fid, shareKey, acc.cookieRaw, proxy)
+    let res = await fetchQualitySources(fid, acc.cookieRaw, proxy)
     if (!res.ok && /network error/i.test(res.error || '')) {
-      res = await fetchPlayerSources(fid, shareKey, acc.cookieRaw, null)
+      res = await fetchQualitySources(fid, acc.cookieRaw, null)
     }
 
     if (res.ok && res.sources && res.sources.length > 0) {
-      const qualities = await fetchQualitySizes(fid, acc.cookieRaw, proxy)
+      const qualities = res.qualities || []
       let estGb = 0
       if (settings.autoUsage) {
         if (requestedQuality !== 'AUTO' && requestedQuality !== 'ORG') {
