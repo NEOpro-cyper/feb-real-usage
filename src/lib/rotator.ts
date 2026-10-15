@@ -68,6 +68,18 @@ const SIG_CACHE_TTL_MS =
 const SIG_CACHE_MAX = 500
 const sigCache = new Map<string, { at: number; outcome: RotationOutcome }>()
 
+/**
+ * IMPLAUSIBLE-FID GUARD — real FebBox file ids are global sequence numbers,
+ * currently 7-8 digits (e.g. 2665061, 51979796). A client that passes tiny
+ * numeric ids (1..40 = EPISODE NUMBERS) used to burn the ENTIRE pool on every
+ * call: each cookie paid a pre-flight + a video_quality_list round trip,
+ * got "file not found", and the rotation moved on — poisoning fetch_logs and
+ * starving real requests (Cloudflare rate limits kick in too).
+ * Requests with fid < MIN_FID are rejected with 400 BEFORE any DB/cookie
+ * work. Env: MIN_FID (default 100000, 0 disables the guard).
+ */
+const MIN_FID = Math.max(0, Number(process.env.MIN_FID ?? '100000'))
+
 /** Estimated GB a fetch counts for, given the quality list (0 when off). */
 function estimateGb(
   qualities: QualityInfo[],
@@ -104,6 +116,7 @@ function estimateGb(
  *
  * Returns:
  *   - status 200 + masterUrl/sources/qualities on success
+ *   - status 400 bad_fid when the fid is implausibly small (guard)
  *   - status 409 no_active_cookies when nothing is eligible
  *   - status 502 all_failed with per-cookie attempts
  */
@@ -112,6 +125,18 @@ export async function runRotation(
   shareKey: string | undefined,
   requestedQuality: string
 ): Promise<RotationOutcome> {
+  // implausible fid (episode number / junk) — reject before ANY work
+  if (MIN_FID > 0 && /^\d+$/.test(fid) && Number(fid) < MIN_FID) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: 'bad_fid',
+        message: `fid ${fid} is implausible — real FebBox file ids are >= ${MIN_FID}. ` +
+          `A client is likely passing an episode number instead of the file_id.` ,
+      },
+    }
+  }
   const settings = await getSettings()
   const proxy = settings.proxyEnabled ? settings.proxyUrl : null
 
