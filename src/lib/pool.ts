@@ -1,6 +1,15 @@
 import { q, one, exec, newId } from '@/lib/db'
 import { fetchRealUsage, type RealUsage } from '@/lib/febbox'
 
+/**
+ * Fresh-mirror window: when an account's usage was synced from FebBox less
+ * than this many seconds ago, the DB mirror is trusted and the live
+ * /console/user_traffic_query round trip in the pre-flight guard is skipped.
+ * Set PREFLIGHT_TTL_SECONDS=0 to always do the live check (old behaviour).
+ */
+const PREFLIGHT_TTL_MS =
+  Math.max(0, Number(process.env.PREFLIGHT_TTL_SECONDS ?? '90')) * 1000
+
 /* ------------------------- settings ------------------------- */
 
 export const DEFAULT_SETTINGS = {
@@ -442,6 +451,34 @@ export async function preflightGuard(
 ): Promise<PreflightResult> {
   if (opts.settings.usageMode !== 'real') {
     return { ok: true, real: null }
+  }
+  // Fresh-mirror shortcut — skip the live FebBox round trip when the mirror
+  // was synced moments ago. The mirror values still guard the quota.
+  const syncedAgeMs = acc.usageSyncedAt
+    ? Date.now() - new Date(acc.usageSyncedAt).getTime()
+    : Number.POSITIVE_INFINITY
+  if (PREFLIGHT_TTL_MS > 0 && syncedAgeMs < PREFLIGHT_TTL_MS) {
+    const ownLimit = acc.realUsageLimitGb > 0 ? acc.realUsageLimitGb : null
+    const threshold = quotaThresholdGb(opts.settings, ownLimit)
+    const real = {
+      usedGb: acc.realUsageGb,
+      limitGb: ownLimit ?? undefined,
+      resetAt: '',
+    }
+    if (acc.realUsageGb >= threshold) {
+      return {
+        ok: false,
+        reason:
+          `quota guard (cached mirror): ${acc.realUsageGb} GB used ≥ ` +
+          `${threshold} GB threshold (${opts.settings.usageSafetyGb} GB safety margin)`,
+        real,
+      }
+    }
+    return {
+      ok: true,
+      real,
+      error: 'preflight skipped — mirror fresher than TTL',
+    }
   }
   const sync = await syncCookieUsage(acc, {
     proxyUrl: opts.proxyUrl,

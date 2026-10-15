@@ -5,6 +5,23 @@ export const UA =
 
 export const BASE = (process.env.FEBBOX_BASE || 'https://www.febbox.com').replace(/\/+$/, '')
 
+/**
+ * Reusable ProxyAgent — creating one per request throws away the keep-alive
+ * connection pool and pays a fresh proxy-tunnel handshake on every call.
+ * The Webshare rotating gateway still assigns a fresh exit IP per new
+ * CONNECT, so reuse here only saves the handshake overhead, not rotation.
+ */
+let _proxyAgent: ProxyAgent | null = null
+let _proxyAgentUrl: string | null = null
+
+function getProxyAgent(proxyUrl: string): ProxyAgent {
+  if (!_proxyAgent || _proxyAgentUrl !== proxyUrl) {
+    _proxyAgent = new ProxyAgent(proxyUrl)
+    _proxyAgentUrl = proxyUrl
+  }
+  return _proxyAgent
+}
+
 export interface BoxHeaders {
   [k: string]: string
 }
@@ -35,7 +52,7 @@ export async function httpThrough(
 ): Promise<{ status: number; body: string }> {
   const { method = 'GET', cookieRaw, proxyUrl, form, extraHeaders, timeoutMs = 45000 } = opts
   let dispatcher: Dispatcher | undefined
-  if (proxyUrl) dispatcher = new ProxyAgent(proxyUrl)
+  if (proxyUrl) dispatcher = getProxyAgent(proxyUrl)
 
   const headers = { ...baseHeaders(cookieRaw), ...(extraHeaders || {}) }
   let body: string | undefined

@@ -7,10 +7,10 @@ import {
   recordSuccess,
   recordFailure,
   countCookies,
+  syncCookieUsage,
 } from '@/lib/pool'
 import {
   fetchQualitySources,
-  fetchRealUsage,
   type QualityInfo,
   type SourceItem,
 } from '@/lib/febbox'
@@ -44,23 +44,29 @@ export interface RotationOutcome {
 }
 
 /**
- * Fetch the account's real flow usage from FebBox (proxy first, direct
- * fallback). Returns null when it can't be fetched — the caller then falls
- * back to the size-based estimate.
+ * STICKY COOKIE — reuse the last cookie that produced a successful fetch
+ * instead of re-rotating on every request. The pool order (least usage,
+ * then LRU) makes consecutive requests flip-flop between cookies once a
+ * post-fetch sync bumps usage, and every flip pays a live FebBox pre-flight
+ * round trip. Sticking to one healthy cookie until it errors/parks (or the
+ * TTL below expires) removes that overhead — while the per-candidate
+ * fallback loop still handles failure inside the same request.
+ * Env: STICKY_COOKIE_MINUTES (default 30).
  */
-async function fetchRealForAccount(
-  cookieRaw: string,
-  proxy: string | null
-): Promise<{ usedGb: number; limitGb?: number; resetAt?: string } | null> {
-  let ru = await fetchRealUsage(cookieRaw, proxy)
-  if (!ru.ok && /network error/i.test(ru.error || '')) {
-    ru = await fetchRealUsage(cookieRaw, null)
-  }
-  if (ru.ok && typeof ru.usedGb === 'number') {
-    return { usedGb: ru.usedGb, limitGb: ru.limitGb, resetAt: ru.resetAt || '' }
-  }
-  return null
-}
+const STICKY_TTL_MS =
+  Math.max(1, Number(process.env.STICKY_COOKIE_MINUTES || '30')) * 60_000
+let sticky: { cookieId: string; until: number } | null = null
+
+/**
+ * SIGNATURE CACHE — febbox play URLs stay valid for hours, so a successful
+ * outcome is cached per fid+shareKey and repeat requests return instantly
+ * with zero febbox traffic and zero cookie usage.
+ * Env: SIGNATURE_CACHE_MINUTES (default 20, 0 disables).
+ */
+const SIG_CACHE_TTL_MS =
+  Math.max(0, Number(process.env.SIGNATURE_CACHE_MINUTES ?? '20')) * 60_000
+const SIG_CACHE_MAX = 500
+const sigCache = new Map<string, { at: number; outcome: RotationOutcome }>()
 
 /** Estimated GB a fetch counts for, given the quality list (0 when off). */
 function estimateGb(
@@ -108,7 +114,32 @@ export async function runRotation(
 ): Promise<RotationOutcome> {
   const settings = await getSettings()
   const proxy = settings.proxyEnabled ? settings.proxyUrl : null
+
+  const cacheKey = `${fid}|${shareKey || ''}`
+  const hit = sigCache.get(cacheKey)
+  if (hit) {
+    if (SIG_CACHE_TTL_MS > 0 && Date.now() - hit.at < SIG_CACHE_TTL_MS) {
+      return {
+        status: 200,
+        body: { ...hit.outcome.body, cached: true },
+      }
+    }
+    sigCache.delete(cacheKey)
+  }
+
   const candidates = await pickCandidates()
+
+  // sticky-first: try the last cookie that succeeded before the pool order
+  if (sticky && sticky.until > Date.now()) {
+    const pinnedId = sticky.cookieId
+    const idx = candidates.findIndex((c) => c.id === pinnedId)
+    if (idx > 0) {
+      const [pinned] = candidates.splice(idx, 1)
+      candidates.unshift(pinned)
+    } else if (idx === -1) {
+      sticky = null
+    }
+  }
 
   if (candidates.length === 0) {
     const total = await countCookies()
@@ -130,6 +161,7 @@ export async function runRotation(
     // 0) pre-flight quota guard — never fetch with an exhausted/near-exhausted cookie
     const pf = await preflightGuard(acc, { proxyUrl: proxy, settings })
     if (!pf.ok) {
+      if (sticky && sticky.cookieId === acc.id) sticky = null
       await recordFailure(acc.id, { fid, message: pf.reason || 'quota guard' })
       attempts.push({
         cookieId: acc.id,
@@ -157,11 +189,9 @@ export async function runRotation(
       // autoSyncUsage is on, re-sync AFTER the fetch so usage_gb reflects
       // what was just consumed. Falls back to the size estimate when real
       // usage can't be read (so the guard still works).
+      // Record usage with the pre-flight reading NOW; the FebBox counter
+      // re-sync runs in the BACKGROUND so it never blocks the response.
       let real = pf.real
-      if (settings.usageMode === 'real' && settings.autoSyncUsage) {
-        const fresh = await fetchRealForAccount(acc.cookieRaw, proxy)
-        if (fresh) real = fresh
-      }
       await recordSuccess(acc.id, {
         fid,
         fileName: res.fileName || '',
@@ -188,7 +218,18 @@ export async function runRotation(
             }
         : { mode: 'estimate', estGbAdded }
 
-      return {
+      // background usage re-sync (also re-applies parking on the mirror)
+      if (settings.usageMode === 'real' && settings.autoSyncUsage) {
+        void syncCookieUsage(acc, {
+          proxyUrl: proxy,
+          usageLimitGb: settings.usageLimitGb,
+          usageSafetyGb: settings.usageSafetyGb,
+        }).catch(() => {})
+      }
+
+      sticky = { cookieId: acc.id, until: Date.now() + STICKY_TTL_MS }
+
+      const outcome: RotationOutcome = {
         status: 200,
         body: {
           success: true,
@@ -206,12 +247,21 @@ export async function runRotation(
           attempts,
         },
       }
+      if (SIG_CACHE_TTL_MS > 0) {
+        sigCache.set(cacheKey, { at: Date.now(), outcome })
+        if (sigCache.size > SIG_CACHE_MAX) {
+          const oldest = sigCache.keys().next().value
+          if (oldest) sigCache.delete(oldest)
+        }
+      }
+      return outcome
     }
 
     // failure path — quota rejections PARK the account (auto-recovers on
     // FebBox's daily flow reset), other account-level errors deactivate it,
     // network/transient errors leave the cookie active.
     const msg = res.error || 'unknown error'
+    if (sticky && sticky.cookieId === acc.id) sticky = null
     if (res.limitError || (res.accountError && /traffic|limit|flow|quota|exceed/i.test(msg))) {
       await markLimitReached(acc.id)
       await recordFailure(acc.id, { fid, message: msg })
